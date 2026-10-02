@@ -1,0 +1,20 @@
+---
+description: Invoke Python as python3 in commands, docs, and code
+alwaysApply: true
+---
+
+# Use python3
+
+On this machine `python` is not the interpreter to use. Write `python3` in shell commands, docs, shebangs, and subprocess calls.
+
+```bash
+# Bad
+python -m pytest
+python -m pip install -r requirements.txt
+
+# Good
+python3 -m pytest
+python3 -m pip install -r requirements.txt
+```
+
+A virtualenv still applies. Activate `.venv`, then run `python3`.

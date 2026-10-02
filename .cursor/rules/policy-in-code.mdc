@@ -1,0 +1,22 @@
+---
+description: Read-only tools may be called by the model; money, writes, and refund numbers stay in code and YAML
+alwaysApply: true
+---
+
+# Policy in code
+
+The model may bind read-only tools: order lookup, order search, FAQ search. It must not bind or call `decide_refund`, `issue_refund`, or `create_ticket`. Graph nodes call those.
+
+The model reports a yes or no in its turn read. Code writes a refund only if that yes answers the refund offered last turn, names the same order, and a fresh `decide_refund` still returns AUTO_REFUND.
+
+Refund tiers, dollar limits, day limits, and escalation contacts belong in `policy/refund_policy.yaml`. Do not hardcode them in prompts or Python. Load the file and fail on invalid values.
+
+```python
+# Bad: the model decides, and the limit is hidden in a prompt
+llm.bind_tools([issue_refund])
+
+# Good: code applies the YAML rule, then a node writes
+decision = decide_refund(order, customer, today)
+if read["confirmation"] == "yes" and state["proposed_refund"] == order["_id"] and decision.outcome == "AUTO_REFUND":
+    issue_refund(order, decision)
+```

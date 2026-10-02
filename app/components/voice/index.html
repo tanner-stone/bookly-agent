@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        background: transparent;
+        color: #1c1915;
+        font-family: "Nunito Sans", "Segoe UI", sans-serif;
+      }
+      body {
+        display: flex;
+        justify-content: center;
+      }
+      .toggle {
+        display: inline-flex;
+        border: 1px solid #1f3d34;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      button {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: #1f3d34;
+        padding: 0.4rem 0.95rem;
+        font: 600 0.92rem "Nunito Sans", "Segoe UI", sans-serif;
+        cursor: pointer;
+      }
+      button.selected {
+        background: #1f3d34;
+        color: #f4efe6;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="toggle">
+      <button id="chat" type="button">Chat</button>
+      <button id="voice" type="button">Voice</button>
+    </div>
+    <script>
+      const chatButton = document.getElementById("chat");
+      const voiceButton = document.getElementById("voice");
+      const player = new Audio();
+      const desk = new BroadcastChannel("bookly-voice");
+      const TAIL_MS = 80;
+      let args = { mode: "chat", play_b64: "", play_token: "", listen_token: "", listen_after: true };
+      let pending = "";
+      try {
+        const saved = JSON.parse(sessionStorage.getItem("bookly-pending-mode") || "null");
+        if (saved && (saved.mode === "voice" || saved.mode === "chat") && Date.now() - saved.at < 4000) {
+          pending = saved.mode;
+        } else {
+          sessionStorage.removeItem("bookly-pending-mode");
+        }
+      } catch (error) {
+        sessionStorage.removeItem("bookly-pending-mode");
+      }
+      let lastPlayed = "";
+      let lastListen = "";
+      let armAfterPlayback = false;
+      let voiceStatus = "";
+      let tailTimer = null;
+      let stream = null;
+      let audioContext = null;
+      let processor = null;
+      let mute = null;
+      let sourceNode = null;
+      let chunks = [];
+      let recording = false;
+      let keepSamples = false;
+      let heardSpeech = false;
+      let quietBuffers = 0;
+      let sampleRate = 48000;
+      let meterTask = null;
+
+      function send(type, data) {
+        window.parent.postMessage(
+          Object.assign({ isStreamlitMessage: true, type: type }, data || {}),
+          "*"
+        );
+      }
+
+      function setHeight() {
+        send("streamlit:setFrameHeight", { height: Math.ceil(document.body.scrollHeight) + 4 });
+      }
+
+      function postStatus(text) {
+        voiceStatus = text || "";
+        desk.postMessage({ status: voiceStatus });
+      }
+
+      desk.onmessage = function (event) {
+        if (event.data && event.data.ask) {
+          desk.postMessage({ status: voiceStatus });
+        }
+      };
+
+      function paint() {
+        chatButton.classList.toggle("selected", args.mode !== "voice");
+        voiceButton.classList.toggle("selected", args.mode === "voice");
+      }
+
+      function unlock() {
+        if (!player.src) {
+          player.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+        }
+        const attempt = player.play();
+        if (attempt) {
+          attempt.then(function () { player.pause(); }).catch(function () {});
+        }
+      }
+
+      async function ensureMic() {
+        if (stream && stream.getTracks().some(function (track) { return track.readyState === "live"; })) {
+          return stream;
+        }
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        return stream;
+      }
+
+      function encodeWav(parts, rate) {
+        let length = 0;
+        parts.forEach(function (part) { length += part.length; });
+        const buffer = new ArrayBuffer(44 + length * 2);
+        const view = new DataView(buffer);
+        function writeString(offset, text) {
+          for (let i = 0; i < text.length; i++) {
+            view.setUint8(offset + i, text.charCodeAt(i));
+          }
+        }
+        writeString(0, "RIFF");
+        view.setUint32(4, 36 + length * 2, true);
+        writeString(8, "WAVE");
+        writeString(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, 1, true);
+        view.setUint32(24, rate, true);
+        view.setUint32(28, rate * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        writeString(36, "data");
+        view.setUint32(40, length * 2, true);
+        let offset = 44;
+        parts.forEach(function (part) {
+          for (let i = 0; i < part.length; i++) {
+            const sample = Math.max(-1, Math.min(1, part[i]));
+            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+            offset += 2;
+          }
+        });
+        return buffer;
+      }
+
+      function toBase64(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        const step = 0x8000;
+        for (let i = 0; i < bytes.length; i += step) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+        }
+        return btoa(binary);
+      }
+
+      function releaseMeter() {
+        if (processor) {
+          processor.disconnect();
+          processor.onaudioprocess = null;
+          processor = null;
+        }
+        if (sourceNode) {
+          sourceNode.disconnect();
+          sourceNode = null;
+        }
+        if (mute) {
+          mute.disconnect();
+          mute = null;
+        }
+      }
+
+      function stopAll() {
+        clearTimeout(tailTimer);
+        releaseMeter();
+        if (audioContext) {
+          audioContext.close();
+          audioContext = null;
+        }
+        if (stream) {
+          stream.getTracks().forEach(function (track) { track.stop(); });
+          stream = null;
+        }
+      }
+
+      function discardRecording() {
+        recording = false;
+        keepSamples = false;
+        chunks = [];
+        armAfterPlayback = false;
+        stopAll();
+        player.pause();
+        postStatus("");
+        paint();
+      }
+
+      function finishRecording() {
+        if (!recording || !keepSamples) {
+          return;
+        }
+        recording = false;
+        keepSamples = false;
+        const parts = chunks;
+        const rate = sampleRate;
+        releaseMeter();
+        chunks = [];
+        let count = 0;
+        parts.forEach(function (part) { count += part.length; });
+        if (args.mode !== "voice") {
+          paint();
+          return;
+        }
+        if (count < rate * 0.3) {
+          startRecording();
+          return;
+        }
+        const wav = encodeWav(parts, rate);
+        postStatus("");
+        send("streamlit:setComponentValue", {
+          value: { kind: "audio", wav_b64: toBase64(wav), token: String(Date.now()) },
+          dataType: "json",
+        });
+      }
+
+      function beginCapture() {
+        chunks = [];
+        heardSpeech = false;
+        quietBuffers = 0;
+        keepSamples = true;
+        recording = true;
+        postStatus("Listening");
+      }
+
+      function scheduleCapture() {
+        clearTimeout(tailTimer);
+        tailTimer = setTimeout(function () {
+          if (!armAfterPlayback || args.mode !== "voice") {
+            return;
+          }
+          armAfterPlayback = false;
+          openMeter().then(function () {
+            if (args.mode === "voice") {
+              beginCapture();
+            }
+          }).catch(function () {
+            postStatus("The microphone is not available.");
+          });
+        }, TAIL_MS);
+      }
+
+      async function openMeter() {
+        if (processor && recording) {
+          return;
+        }
+        if (meterTask) {
+          return meterTask;
+        }
+        meterTask = connectMeter();
+        try {
+          await meterTask;
+        } finally {
+          meterTask = null;
+        }
+      }
+
+      async function connectMeter() {
+        const live = await ensureMic();
+        if (args.mode !== "voice") {
+          return;
+        }
+        if (!audioContext || audioContext.state === "closed") {
+          audioContext = new AudioContext();
+        }
+        await audioContext.resume();
+        sampleRate = audioContext.sampleRate;
+        sourceNode = audioContext.createMediaStreamSource(live);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        mute = audioContext.createGain();
+        mute.gain.value = 0;
+        chunks = [];
+        heardSpeech = false;
+        quietBuffers = 0;
+        recording = true;
+        keepSamples = false;
+        processor.onaudioprocess = function (event) {
+          if (!recording || !keepSamples) {
+            return;
+          }
+          const input = event.inputBuffer.getChannelData(0);
+          chunks.push(new Float32Array(input));
+          let sum = 0;
+          for (let i = 0; i < input.length; i++) {
+            sum += input[i] * input[i];
+          }
+          const rms = Math.sqrt(sum / input.length);
+          if (rms > 0.015) {
+            heardSpeech = true;
+            quietBuffers = 0;
+          } else if (heardSpeech) {
+            quietBuffers += 1;
+            if (quietBuffers >= 12) {
+              finishRecording();
+            }
+          }
+        };
+        sourceNode.connect(processor);
+        processor.connect(mute);
+        mute.connect(audioContext.destination);
+      }
+
+      async function startRecording() {
+        if (args.mode !== "voice" || keepSamples) {
+          return;
+        }
+        try {
+          await openMeter();
+          if (args.mode !== "voice") {
+            return;
+          }
+          beginCapture();
+        } catch (error) {
+          recording = false;
+          keepSamples = false;
+          postStatus("The microphone is not available.");
+        }
+      }
+
+      function stopListening() {
+        armAfterPlayback = false;
+        keepSamples = false;
+        recording = false;
+        chunks = [];
+        clearTimeout(tailTimer);
+        releaseMeter();
+        postStatus("");
+      }
+
+      function playOnly(src) {
+        stopListening();
+        postStatus("Speaking");
+        player.src = src;
+        const attempt = player.play();
+        if (attempt) {
+          attempt.catch(function () { postStatus(""); });
+        }
+      }
+
+      function playThenListen(src) {
+        keepSamples = false;
+        chunks = [];
+        armAfterPlayback = true;
+        postStatus("Speaking");
+        openMeter().catch(function () {
+          postStatus("The microphone is not available.");
+        });
+        player.src = src;
+        const attempt = player.play();
+        if (!attempt) {
+          scheduleCapture();
+          return;
+        }
+        attempt.catch(function () {
+          if (armAfterPlayback) {
+            scheduleCapture();
+          }
+        });
+      }
+
+      player.addEventListener("ended", function () {
+        if (!armAfterPlayback || args.mode !== "voice") {
+          if (!armAfterPlayback) {
+            postStatus("");
+          }
+          return;
+        }
+        scheduleCapture();
+      });
+
+      function sendMode(mode) {
+        pending = mode;
+        sessionStorage.setItem("bookly-pending-mode", JSON.stringify({ mode: mode, at: Date.now() }));
+        args.mode = mode;
+        paint();
+        send("streamlit:setComponentValue", {
+          value: { kind: "mode", mode: mode, token: String(Date.now()) },
+          dataType: "json",
+        });
+      }
+
+      chatButton.addEventListener("click", function () {
+        if (args.mode === "chat" && pending !== "voice") {
+          return;
+        }
+        discardRecording();
+        sendMode("chat");
+      });
+
+      voiceButton.addEventListener("click", function () {
+        const switching = args.mode !== "voice";
+        unlock();
+        const mic = ensureMic();
+        if (switching) {
+          postStatus("Listening");
+          sendMode("voice");
+        }
+        mic.then(function () {
+          if (!audioContext || audioContext.state === "closed") {
+            audioContext = new AudioContext();
+          }
+          return audioContext.resume();
+        }).then(function () {
+          if (!switching && !keepSamples) {
+            startRecording();
+          }
+        }).catch(function () {
+          postStatus("The microphone is not available.");
+        });
+      });
+
+      window.addEventListener("message", function (event) {
+        if (!event.data || event.data.type !== "streamlit:render") {
+          return;
+        }
+        const next = event.data.args || {};
+        const incoming = next.mode || "chat";
+        if (pending && incoming !== pending) {
+          args.mode = pending;
+          paint();
+          setHeight();
+          return;
+        }
+        pending = "";
+        sessionStorage.removeItem("bookly-pending-mode");
+        args = {
+          mode: next.mode || "chat",
+          play_b64: next.play_b64 || "",
+          play_token: next.play_token || "",
+          listen_token: next.listen_token || "",
+          listen_after: next.listen_after !== false,
+        };
+        paint();
+        if (args.mode !== "voice") {
+          discardRecording();
+          setHeight();
+          return;
+        }
+        const playChanged = args.play_b64 && args.play_token && args.play_token !== lastPlayed;
+        const listenChanged = args.listen_token && args.listen_token !== lastListen;
+        if (!args.listen_after && !playChanged && (recording || armAfterPlayback || voiceStatus)) {
+          stopListening();
+        }
+        if (playChanged) {
+          lastPlayed = args.play_token;
+          if (listenChanged) {
+            lastListen = args.listen_token;
+          }
+          const src = "data:audio/mpeg;base64," + args.play_b64;
+          if (args.listen_after) {
+            playThenListen(src);
+          } else {
+            playOnly(src);
+          }
+          setHeight();
+          return;
+        }
+        if (listenChanged && args.listen_after) {
+          lastListen = args.listen_token;
+          startRecording();
+        }
+        setHeight();
+      });
+
+      if (pending === "voice" || pending === "chat") {
+        args.mode = pending;
+      }
+      send("streamlit:componentReady", { apiVersion: 1 });
+      paint();
+      setHeight();
+    </script>
+  </body>
+</html>

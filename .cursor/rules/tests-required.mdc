@@ -1,0 +1,20 @@
+---
+description: Policy and graph changes need model-free pytest; real-model evals stay opt-in
+alwaysApply: true
+---
+
+# Tests required
+
+Changes to refund policy, order matching, or graph routing need pytest coverage. Tests must not call xAI or Voyage.
+
+Assert outcomes, rule ids, and tool calls. Do not assert exact assistant wording.
+
+```bash
+# CI
+python3 -m pytest
+
+# Opt-in, real model, not collected by pytest
+python3 -m evals.run
+```
+
+Put the eval script under `evals/`, not `tests/`. A new refund branch needs a table-driven case, including the boundary on each side of the limit.

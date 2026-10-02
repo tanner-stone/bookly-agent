@@ -1,0 +1,39 @@
+# Dated build, not latest or preview. This tag bundles mongod and mongot.
+# Embeddings are computed by the app. The container does not call Voyage.
+services:
+  mongodb:
+    image: mongodb/mongodb-atlas-local:8.0.32-20260925T092318Z
+    hostname: mongodb
+    environment:
+      MONGODB_INITDB_ROOT_USERNAME: bookly
+      MONGODB_INITDB_ROOT_PASSWORD: bookly
+    ports:
+      - "27017:27017"
+    volumes:
+      - db:/data/db
+      - configdb:/data/configdb
+      - mongot:/data/mongot
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--quiet",
+          "--username",
+          "bookly",
+          "--password",
+          "bookly",
+          "--authenticationDatabase",
+          "admin",
+          "--eval",
+          "db.adminCommand('ping').ok",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  db:
+  configdb:
+  mongot:

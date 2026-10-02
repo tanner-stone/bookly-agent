@@ -1,0 +1,58 @@
+# Bookly refund policy
+#
+# A support lead can change the contacts, the limits, and the rule order here.
+# Code loads this file and refuses to decide a refund if a value is missing or invalid.
+#
+# Rules are tried from top to bottom. The first match wins.
+# Dollar and day limits are inclusive: a value equal to the limit still matches.
+# The engine always compares with <=. This file has no switch to make a limit exclusive.
+#
+# Refunds cover the whole order. This file does not describe partial refunds.
+#
+# "Already refunded" means the order status is refunded. Keep that rule, and the
+# cancelled rule, above "not delivered". The loader rejects a file that does not.
+
+support:
+  email: support@bookly.example
+  phone: "1-800-555-0148"
+
+rules:
+  - id: already_refunded
+    description: Never refund the same order twice.
+    when:
+      order_status: refunded
+    outcome: ALREADY_REFUNDED
+
+  - id: cancelled
+    description: A cancelled order is not a refund, and it is not "still on the way".
+    when:
+      order_status: cancelled
+    outcome: NOT_APPLICABLE
+
+  - id: not_delivered
+    description: Any other status has not been delivered yet, so a refund is too early.
+    when:
+      order_status_not: delivered
+    outcome: NOT_ELIGIBLE_YET
+
+  - id: standard_refund
+    description: Recent, lower-value delivered orders. Prior refunds are not considered.
+    when:
+      max_total_usd: "50.00"
+      max_days_since_delivery: 30
+    outcome: AUTO_REFUND
+    tier: standard
+
+  - id: first_time_goodwill
+    description: A wider window, only when this customer has never been refunded.
+    when:
+      max_prior_refunds: 0
+      max_total_usd: "150.00"
+      max_days_since_delivery: 45
+    outcome: AUTO_REFUND
+    tier: first_time_goodwill
+    customer_note: This is a one-time exception.
+
+  - id: escalate
+    description: No earlier rule matched, so a person decides.
+    outcome: ESCALATE

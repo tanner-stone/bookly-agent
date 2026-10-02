@@ -1,0 +1,11 @@
+langgraph
+langchain-xai
+langchain-core
+langgraph-checkpoint-mongodb
+pymongo
+python-dotenv
+httpx
+pydantic
+pyyaml
+streamlit
+pytest

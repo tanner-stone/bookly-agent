@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        background: transparent;
+        color: #5c564c;
+        font-family: "Nunito Sans", "Segoe UI", sans-serif;
+      }
+      p {
+        margin: 0;
+        min-height: 0;
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <p id="status"></p>
+    <script>
+      const status = document.getElementById("status");
+      const desk = new BroadcastChannel("bookly-voice");
+
+      function send(type, data) {
+        window.parent.postMessage(
+          Object.assign({ isStreamlitMessage: true, type: type }, data || {}),
+          "*"
+        );
+      }
+
+      function show(text) {
+        status.textContent = text || "";
+        const height = text ? Math.ceil(document.body.scrollHeight) + 2 : 0;
+        send("streamlit:setFrameHeight", { height: height });
+      }
+
+      desk.onmessage = function (event) {
+        if (!event.data || event.data.ask) {
+          return;
+        }
+        show(event.data.status || "");
+      };
+
+      send("streamlit:componentReady", { apiVersion: 1 });
+      show("");
+      desk.postMessage({ ask: true });
+    </script>
+  </body>
+</html>
